@@ -468,21 +468,28 @@ def describe(plans: list[dict]) -> list[str]:
     return out
 
 
-def _request(method: str, url: str, token: str, body: dict) -> int:
-    """One call at a polite pace, retried on 429. Returns the HTTP status (0 on a network error)."""
+def _call(method: str, url: str, token: str, body: dict) -> tuple[int, dict]:
+    """One call at a polite pace, retried on 429. Returns (HTTP status, JSON); status 0 on a network error."""
     for attempt in range(3):
         time.sleep(0.4)   # Notion allows about 3 requests a second
         try:
             r = requests.request(method, url, headers=_headers(token), json=body, timeout=30)
         except requests.RequestException as e:
             log.info("  Notion: request failed (%s)", type(e).__name__)
-            return 0
+            return 0, {}
         if r.status_code == 429 and attempt < 2:
             wait = r.headers.get("retry-after", "2")
             time.sleep(min(30, int(wait) if wait.isdigit() else 2))
             continue
-        return r.status_code
-    return 429
+        try:
+            return r.status_code, r.json()
+        except ValueError:
+            return r.status_code, {}
+    return 429, {}
+
+
+def _request(method: str, url: str, token: str, body: dict) -> int:
+    return _call(method, url, token, body)[0]
 
 
 def apply_writes(plans: list[dict], ncfg: dict) -> tuple[list[dict], int]:
@@ -553,3 +560,240 @@ def append_log(ncfg: dict, blocks: list[dict]) -> bool:
             log.info("  Notion: activity log append returned %s", code)
             return False
     return True
+
+
+# ---------------------------------------------------------------- Bot Finds
+# A staging table for new opportunities. The bot adds finds there, humans give feedback,
+# and "Promote" copies a find into the main table as Inbox. Nothing is ever deleted.
+
+def _norm_url(u: str) -> str:
+    u = re.sub(r"^https?://(www\.)?", "", (u or "").strip().lower())
+    return re.split(r"[?#]", u)[0].rstrip("/")
+
+
+def _name_key(s: str) -> str:
+    return _norm(re.sub(r"\([^)]*\)", " ", s or ""))
+
+
+def _known(*row_lists: list[dict]) -> tuple[set, list]:
+    urls, names = set(), []
+    for rows in row_lists:
+        for r in rows:
+            for u in r.get("urls") or []:
+                if u:
+                    urls.add(_norm_url(u))
+            k = _name_key(r.get("title", ""))
+            if k:
+                names.append(k)
+    return urls, names
+
+
+def _is_dup(urls: list[str], name: str, known_urls: set, known_names: list) -> bool:
+    if any(_norm_url(u) in known_urls for u in urls if u):
+        return True
+    k = _name_key(name)
+    if not k:
+        return False
+    # Same name, or one contains the other when it is long enough to be specific.
+    return any(k == n or (min(len(k), len(n)) >= 15 and (k in n or n in k)) for n in known_names)
+
+
+def fetch_finds(ncfg: dict) -> list[dict]:
+    """All rows of the Bot Finds table, with the columns named in config."""
+    fcfg = ncfg.get("finds") or {}
+    token = os.environ.get(ncfg.get("token_env", "NOTION_TOKEN"))
+    if not (fcfg.get("id") and token):
+        return []
+    pages = _query(fcfg["id"], token)
+    if pages is None:
+        log.info("  Notion Bot Finds: unreadable")
+        return []
+    pc, rows = fcfg["props"], []
+    for p in pages:
+        props = {k: _plain(v) for k, v in p.get("properties", {}).items()}
+        rows.append({"id": p["id"], "notion_url": p.get("url", ""), "props": props,
+                     "title": props.get(pc["title"]) or "",
+                     "urls": [props.get(pc["link"]), props.get(pc["found_via"])],
+                     "feedback": props.get(pc["feedback"]), "type": props.get(pc["type"])})
+    log.info("  Notion Bot Finds: %d rows", len(rows))
+    return rows
+
+
+def feedback_note(finds: list[dict], ncfg: dict, limit: int = 15) -> str:
+    """Names humans liked or rejected, appended to the scoring prompt so the next feed review learns."""
+    opt = (ncfg.get("finds") or {}).get("options", {})
+    good = [f["title"] for f in finds if f["feedback"] in opt.get("learn_good", [])][-limit:]
+    bad = [f["title"] for f in finds if f["feedback"] in opt.get("learn_bad", [])][-limit:]
+    if not (good or bad):
+        return ""
+    return ("\n\nTEAM FEEDBACK ON EARLIER FINDS (judge similar items the same way)\n"
+            f"Liked: {'; '.join(good) or 'none yet'}\nRejected as not relevant or wrong: {'; '.join(bad) or 'none yet'}\n")
+
+
+def pick_finds(good: list, ncfg: dict) -> list[dict]:
+    """Turn the week's best feed reviews into candidate finds."""
+    fcfg = ncfg.get("finds") or {}
+    min_score = fcfg.get("min_score", 7)
+    out = []
+    for j in good:
+        l = j.llm
+        if l.get("model") == "none" or l["status"] == "SKIP" or l["score"] < min_score:
+            continue
+        dl = str(l.get("deadline", "")).strip()
+        stated = f"Posting says: {dl}. " if dl and dl.lower() not in ("unknown", "rolling", "not stated") else ""
+        cover = {"fully_funded": "Fully funded (per the posting)", "partial": "Partial funding (per the posting)"}.get(l.get("funding"), "")
+        level = {"phd": ["PhD"], "msc": ["Masters"]}.get(l.get("level"), [])
+        out.append({"title": clean_text(j.title)[:150], "type": fcfg["options"]["scheme"], "found_via": j.url,
+                    "org": str(l.get("university") or j.company)[:150], "level": level, "coverage": cover,
+                    "notes": (stated + (ncfg.get("confirm_note", "Confirm with Guideline")))[:300],
+                    # Neutral on purpose: the table is shared, so nothing from anyone's profile goes in it.
+                    "why": (f"Scored {l['score']}/10 by the bot on its feed review. "
+                            f"{(level[0] + ' level, ') if level else ''}{(cover.lower() + ', ') if cover else ''}"
+                            f"host: {str(l.get('university') or j.company)[:80]}.")[:300],
+                    "source": j.source, "blockers": str(l.get("blockers", ""))})
+    return out
+
+
+def plan_finds(cands: list[dict], main_rows: list[dict], finds: list[dict], ncfg: dict) -> tuple[list[dict], int]:
+    """New finds to add (at most max_per_run) and how many were skipped as already known anywhere."""
+    fcfg = ncfg.get("finds") or {}
+    urls, names = _known([{"urls": [r["link"]], "title": r["title"]} for r in main_rows], finds)
+    new, dups = [], 0
+    for c in sorted(cands, key=lambda c: -int(re.search(r"(\d+)/10", c["why"]).group(1))):
+        if _is_dup([c["found_via"]], c["title"], urls, names):
+            dups += 1
+            continue
+        if len(new) >= fcfg.get("max_per_run", 5):
+            continue
+        new.append(c)
+        urls.add(_norm_url(c["found_via"]))
+        names.append(_name_key(c["title"]))
+    return new, dups
+
+
+def _find_props(c: dict, fcfg: dict) -> dict:
+    pc = fcfg["props"]
+    props = {pc["title"]: {"title": [_text(c["title"])]},
+             pc["type"]: {"select": {"name": c["type"]}},
+             pc["found_via"]: {"url": c["found_via"] or None},
+             pc["org"]: {"rich_text": [_text(c["org"])] if c["org"] else []},
+             pc["level"]: {"multi_select": [{"name": n} for n in c["level"]]},
+             pc["coverage"]: {"rich_text": [_text(c["coverage"])] if c["coverage"] else []},
+             pc["notes"]: {"rich_text": [_text(c["notes"])]},
+             pc["why"]: {"rich_text": [_text(c["why"])]}}
+    return props
+
+
+def _body(lines: list[str]) -> list[dict]:
+    return [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [_text(s)]}} for s in lines if s]
+
+
+def create_finds(new: list[dict], ncfg: dict, today: date) -> list[dict]:
+    token = os.environ.get(ncfg.get("token_env", "NOTION_TOKEN"))
+    fcfg, made = ncfg["finds"], []
+    for c in new:
+        body = {"parent": {"database_id": fcfg["id"]}, "properties": _find_props(c, fcfg),
+                "children": _body([f"Found by the weekly bot on {today.isoformat()} in the feed {c['source'].replace('rss:', '')}.",
+                                   f"Possible blockers: {c['blockers']}" if c["blockers"] not in ("", "None") else "",
+                                   "Not yet checked against an official page. Set Human Feedback to review it."])}
+        code, data = _call("POST", f"{API}/pages", token, body)
+        if code == 200:
+            made.append({**c, "id": data.get("id", "")})
+        else:
+            log.info("  Notion: could not add find %s (%s)", c["title"][:50], code)
+    return made
+
+
+def _map_level(kind: str, levels: list[str]) -> list[str] | str | None:
+    if kind == "Programme":       # Degree Type is a single select with different names
+        if not levels:
+            return None
+        return "Direct PhD" if levels[0] == "PhD" else levels[0]
+    return levels
+
+
+def plan_promotions(finds: list[dict], main_rows: list[dict], ncfg: dict) -> list[dict]:
+    """Finds a human marked Promote. Already in a main table means Duplicate instead of a new row."""
+    fcfg = ncfg.get("finds") or {}
+    opt = fcfg.get("options", {})
+    urls, names = _known([{"urls": [r["link"]], "title": r["title"]} for r in main_rows])
+    out = []
+    for f in finds:
+        if f["feedback"] != opt.get("promote"):
+            continue
+        dup = _is_dup(f["urls"], f["title"], urls, names)
+        out.append({"find": f, "duplicate": dup, "target": (fcfg.get("promote_to") or {}).get(f["type"] or opt["scheme"])})
+    return out
+
+
+def _main_props(f: dict, spec: dict, fcfg: dict) -> dict:
+    pc, m, fp = fcfg["props"], spec["map"], f["props"]
+    levels = fp.get(pc["level"]) or []
+    props = {m["title"]: {"title": [_text(f["title"])]},
+             m["status"]: {"status": {"name": spec.get("status", "Inbox")}},
+             m["people"]: {"multi_select": [{"name": n} for n in (fp.get(pc["people"]) or [fcfg["options"].get("shared", "Shared")])]}}
+    link = fp.get(pc["link"]) or fp.get(pc["found_via"])
+    if link and m.get("link"):
+        props[m["link"]] = {"url": link}
+    if fp.get(pc["deadline"]) and m.get("deadline"):
+        props[m["deadline"]] = {"date": {"start": fp[pc["deadline"]][:10]}}
+    if fp.get(pc["notes"]) and m.get("notes"):
+        props[m["notes"]] = {"rich_text": [_text(fp[pc["notes"]])]}
+    if fp.get(pc["coverage"]) and m.get("coverage"):
+        props[m["coverage"]] = {"rich_text": [_text(fp[pc["coverage"]])]}
+    if fp.get(pc["org"]) and m.get("org"):
+        props[m["org"]] = {"rich_text": [_text(fp[pc["org"]])]}
+    lv = _map_level(f["type"] or "Scheme", levels)
+    if lv and m.get("level"):
+        props[m["level"]] = {"select": {"name": lv}} if isinstance(lv, str) else {"multi_select": [{"name": n} for n in lv]}
+    return props
+
+
+def apply_promotions(plans: list[dict], ncfg: dict, today: date) -> list[dict]:
+    token = os.environ.get(ncfg.get("token_env", "NOTION_TOKEN"))
+    fcfg = ncfg["finds"]
+    opt, fb = fcfg["options"], fcfg["props"]["feedback"]
+    dbs = {d["name"]: d["id"] for d in ncfg.get("databases") or []}
+    done = []
+    for p in plans:
+        f, spec = p["find"], p["target"]
+        if p["duplicate"] or not spec or spec["database"] not in dbs:
+            result, new_id = opt["duplicate"], ""
+        else:
+            fp = f["props"]
+            body = {"parent": {"database_id": dbs[spec["database"]]}, "properties": _main_props(f, {**spec, "status": ncfg.get("promote_status", "Inbox")}, fcfg),
+                    "children": _body([f"Promoted from Bot Finds on {today.isoformat()}. Found via: {fp.get(fcfg['props']['found_via']) or 'n/a'}.",
+                                       f"Why the bot picked it: {fp.get(fcfg['props']['why']) or 'n/a'}",
+                                       "Not yet verified against an official page: confirm deadline and eligibility before relying on it."])}
+            code, data = _call("POST", f"{API}/pages", token, body)
+            if code != 200:
+                log.info("  Notion: could not promote %s (%s)", f["title"][:50], code)
+                continue
+            result, new_id = opt["promoted"], data.get("id", "")
+        if _request("PATCH", f"{API}/pages/{f['id']}", token, {"properties": {fb: {"select": {"name": result}}}}) == 200:
+            done.append({**p, "result": result, "new_id": new_id})
+    return done
+
+
+def describe_finds(new: list[dict], dups: int, promos: list[dict]) -> list[str]:
+    out = [f"  add find: {c['title'][:70]} | {c['found_via']} | {c['why'][:80]}" for c in new]
+    out.append(f"  skipped as already known: {dups}")
+    out += [f"  promote: {p['find']['title'][:70]} -> {'DUPLICATE, will be marked Duplicate' if p['duplicate'] else (p['target'] or {}).get('database', 'no target')}"
+            for p in promos]
+    return out
+
+
+def finds_blocks(added: list[dict], dups: int, promoted: list[dict], dry: bool) -> list[dict]:
+    """Extra Activity Log lines for the Bot Finds table."""
+    word = "Would add" if dry else "Added"
+    blocks = [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [_text(
+        f"Bot Finds: {word.lower()} {len(added)} new finds, skipped {dups} already known in a main table or in Bot Finds, "
+        f"promotions handled {len(promoted)}.")]}}]
+    for a in added:
+        rt = ([{"type": "mention", "mention": {"type": "page", "page": {"id": a["id"]}}}] if a.get("id") else [_text(a["title"])])
+        blocks.append({"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": rt + [_text(": new find in Bot Finds")]}})
+    for p in promoted:
+        rt = [{"type": "mention", "mention": {"type": "page", "page": {"id": p["new_id"] or p["find"]["id"]}}},
+              _text(": promoted from Bot Finds" if p["new_id"] else ": marked Duplicate, already in a main table")]
+        blocks.append({"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": rt}})
+    return blocks
