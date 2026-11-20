@@ -327,17 +327,17 @@ def main() -> None:
         for al in alerts:
             state["alerted"][al["tag"]] = today.isoformat()
         notion.mark_reported(notes, state)
-    written, failed, added, promoted = [], 0, [], []
+    written, failed, finds_made, promoted = [], 0, [], []
     if ncfg.get("write") and (plans or new_finds or promos or find_dups):
         written, failed = notion.apply_writes(plans, ncfg)
-        added = notion.create_finds(new_finds, ncfg, today) if new_finds else []
+        finds_made = notion.create_finds(new_finds, ncfg, today) if new_finds else []
         promoted = notion.apply_promotions(promos, ncfg, today) if promos else []
         entry = notion.activity_entry(written, failed, nstats, fstats, today, dry=False)
         if ncfg.get("finds"):
-            entry += notion.finds_blocks(added, find_dups, promoted, dry=False)
+            entry += notion.finds_blocks(finds_made, find_dups, promoted, dry=False)
         logged = notion.append_log(ncfg, entry)
         log.info("Notion: wrote %d rows, %d failed, finds added %d, promotions %d, activity log %s",
-                 len(written), failed, len(added), len(promoted), "added" if logged else "NOT added")
+                 len(written), failed, len(finds_made), len(promoted), "added" if logged else "NOT added")
     STATE.write_text(json.dumps(state, indent=1), encoding="utf-8")
     log.info("Done. tracker +%d | picks %d | alerts %d | notion rows %d checked %d deadlines %d changed %d "
              "written %d failed %d | emailed %s",
