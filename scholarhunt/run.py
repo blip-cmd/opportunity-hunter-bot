@@ -233,6 +233,9 @@ def main() -> None:
     profile = (SEARCH / "profile.md").read_text(encoding="utf-8")
     profile += "\n\nGRAD SCHOOL TARGETS\n" + yaml.safe_dump(
         {k: cfg[k] for k in ("candidate", "targets", "intakes", "countries", "english_proficiency")}, sort_keys=False)
+    ncfg = cfg.get("notion") or {}
+    finds_rows = notion.fetch_finds(ncfg) if ncfg.get("finds") else []
+    profile += notion.feedback_note(finds_rows, ncfg)
     scorer = None if a.no_llm else Scorer(profile, run["max_llm_calls"])
     scored = []
     for j in fresh:
@@ -261,11 +264,17 @@ def main() -> None:
     picks = [j for j in good if j.llm["score"] >= run["pick_min_score"]][: run["picks_max"]]
     alerts = deadline_alerts(cfg, state, today)
 
-    ncfg = cfg.get("notion") or {}
     notes, nstats, nrows, plans, fstats = [], {}, [], [], {}
+    new_finds, find_dups, promos = [], 0, []
     if ncfg:
         log.info("Notion%s:", "" if ncfg.get("write") else " (read only)")
-        nrows = notion.in_scope(notion.fetch_rows(ncfg), ncfg)
+        main_rows = notion.fetch_rows(ncfg)
+        nrows = notion.in_scope(main_rows, ncfg)
+        if ncfg.get("write") and ncfg.get("finds"):
+            new_finds, find_dups = notion.plan_finds(notion.pick_finds(good, ncfg), main_rows, finds_rows, ncfg)
+            promos = notion.plan_promotions(finds_rows, main_rows, ncfg)
+            log.info("Bot Finds %s:\n%s", "planned, NOT sent (dry run)" if a.dry_run else "to send",
+                     "\n".join(notion.describe_finds(new_finds, find_dups, promos)))
         usable = scorer if scorer and scorer.available else None
         nstats = notion.check(nrows, usable, state, today, ncfg.get("max_llm_calls", 30))
         alerts += notion.deadline_alerts(nrows, state, today, cfg["alerts"]["days_before"])
@@ -290,6 +299,7 @@ def main() -> None:
     if a.dry_run:
         if ncfg.get("write"):
             entry = notion.activity_entry(plans, 0, nstats, fstats, today, dry=True)
+            entry += notion.finds_blocks(new_finds, find_dups, promos, dry=True)
             log.info("Bot Activity Log entry that a real run would append:\n%s", "\n".join(notion.entry_text(entry)))
         log.info("Dry run: nothing written or sent.")
         return
@@ -314,11 +324,17 @@ def main() -> None:
         for al in alerts:
             state["alerted"][al["tag"]] = today.isoformat()
         notion.mark_reported(notes, state)
-    written, failed = [], 0
-    if ncfg.get("write") and plans:
+    written, failed, added, promoted = [], 0, [], []
+    if ncfg.get("write") and (plans or new_finds or promos or find_dups):
         written, failed = notion.apply_writes(plans, ncfg)
-        logged = notion.append_log(ncfg, notion.activity_entry(written, failed, nstats, fstats, today, dry=False))
-        log.info("Notion: wrote %d rows, %d failed, activity log %s", len(written), failed, "added" if logged else "NOT added")
+        added = notion.create_finds(new_finds, ncfg, today) if new_finds else []
+        promoted = notion.apply_promotions(promos, ncfg, today) if promos else []
+        entry = notion.activity_entry(written, failed, nstats, fstats, today, dry=False)
+        if ncfg.get("finds"):
+            entry += notion.finds_blocks(added, find_dups, promoted, dry=False)
+        logged = notion.append_log(ncfg, entry)
+        log.info("Notion: wrote %d rows, %d failed, finds added %d, promotions %d, activity log %s",
+                 len(written), failed, len(added), len(promoted), "added" if logged else "NOT added")
     STATE.write_text(json.dumps(state, indent=1), encoding="utf-8")
     log.info("Done. tracker +%d | picks %d | alerts %d | notion rows %d checked %d deadlines %d changed %d "
              "written %d failed %d | emailed %s",
