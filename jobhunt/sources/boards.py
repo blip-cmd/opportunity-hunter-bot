@@ -16,7 +16,7 @@ from ..models import Job, clean_text, parse_date
 
 log = logging.getLogger("jobhunt")
 Keep = Callable[[str, str], bool]
-DESC_LIMIT = 6000
+DESC_LIMIT = 12000
 
 
 def remotive(searches: list[str], keep: Keep) -> Iterable[Job]:

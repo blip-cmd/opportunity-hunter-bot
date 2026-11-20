@@ -100,7 +100,7 @@ def _run(scrape_jobs, queries, keep, hours_old, pause, max_blocked, blocks) -> I
                 title=title,
                 location=loc,
                 url=_val(row.get("job_url_direct")) or _val(row.get("job_url")),
-                description=clean_text(_val(row.get("description")), 6000),
+                description=clean_text(_val(row.get("description")), 12000),
                 posted=parse_date(_val(row.get("date_posted"))),
                 remote=bool(row.get("is_remote")) if row.get("is_remote") is not None else None,
             )

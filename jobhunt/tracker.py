@@ -6,6 +6,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from . import verify
 from .models import Job
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,7 +39,8 @@ def add_job(job: Job, next_action: str) -> bool:
         status=l.get("status", "STRETCH"),
         score=f"{l.get('score', '?')}/10",
         gates=gates_text(l.get("gates") or {}),
-        prereqs=l.get("prerequisites_blockers", "Unknown"),
+        prereqs=l.get("prerequisites_blockers", "Unknown") + (
+            f' | Eligible from home: {verify.summary(job)}' if l.get("eligibility") else ""),
         gaps=l.get("gaps", ""),
         cv_profile=CV_PROFILE.get(l.get("cv_profile", ""), l.get("cv_profile", "software")),
         deadline=l.get("deadline") or job.deadline or "Rolling",

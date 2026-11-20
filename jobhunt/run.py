@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-from . import emailer, tracker, watchlist
+from . import emailer, tracker, verify, watchlist
 from .filters import Filters
 from .llm import Scorer
 from .models import Job
@@ -100,6 +100,8 @@ def main() -> None:
     cfg = yaml.safe_load((HERE / "config.yaml").read_text(encoding="utf-8"))
     profile = (HERE / "profile.md").read_text(encoding="utf-8")
     emailer.set_cv_files(cfg.get("email", {}).get("cv_files"))
+    home = cfg["run"].get("home_country", "home country")
+    emailer.set_home(home)
     f = Filters(cfg)
     store = Store(HERE / "state" / "seen.json")
     run = cfg["run"]
@@ -159,6 +161,14 @@ def main() -> None:
         (j for j in pool.values() if (j.llm or {}).get("status") in {"APPLY", "STRETCH"}),
         key=rank_value, reverse=True,
     )
+    # 4b. Open the real posting of the best matches and drop any the candidate cannot apply to
+    if scorer and scorer.providers:
+        top = [j for j in ranked if j.llm["score"] >= run["pick_floor_score"]][: run.get("verify_max", 10)]
+        verify.check(top, scorer, candidate=profile.strip().splitlines()[0], home=home)
+        for j in top:
+            if j.key in store.jobs and not a.dry_run:
+                store.mark(j.key, llm=j.llm, **({"rejected": "not eligible from home country"} if verify.excluded(j) else {}))
+        ranked = [j for j in ranked if not verify.excluded(j)]
     picks = [j for j in ranked if j.llm["score"] >= run["pick_min_score"]][: run["picks_max"]]
     if len(picks) < run["picks_min"]:  # never send fewer than picks_min if anything decent exists
         extra = [j for j in ranked if j not in picks and j.llm["score"] >= run["pick_floor_score"]]

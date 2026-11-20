@@ -9,6 +9,7 @@ import ssl
 from datetime import date
 from email.message import EmailMessage
 
+from . import verify
 from .models import Job
 
 log = logging.getLogger("jobhunt")
@@ -17,6 +18,14 @@ E = html.escape
 # CV file names live in the private config (email.cv_files); generic defaults here
 # so the public runner repo carries no personal details.
 CV_FILES = {"data": "Data CV", "software": "Software CV", "ml": "ML CV", "robotics": "Robotics CV"}
+
+
+HOME = "home country"
+
+
+def set_home(name: str) -> None:
+    global HOME
+    HOME = name
 
 
 def set_cv_files(mapping: dict | None) -> None:
@@ -43,6 +52,7 @@ def _card(rank: int, j: Job) -> str:
   <p style="margin:4px 0"><b>Why you:</b> {E(l.get('why_fit', ''))}</p>
   <p style="margin:4px 0"><b>Gaps:</b> {E(l.get('gaps', ''))}</p>
   <p style="margin:4px 0"><b>Blockers:</b> {E(l.get('prerequisites_blockers', ''))}</p>
+  <p style="margin:4px 0"><b>Open to {E(HOME)}:</b> {E(verify.summary(j))}</p>
   <p style="margin:4px 0"><b>Lead with:</b> {E(l.get('cover_note', ''))}</p>
   <p style="margin:4px 0"><b>CV to send:</b> {E(CV_FILES.get(l.get('cv_profile', ''), 'General 2-page CV'))} &middot; <b>Deadline:</b> {E(str(l.get('deadline', 'Rolling')))}</p>
   <p style="margin:10px 0 0"><a href="{E(j.url)}" style="background:#1a56db;color:#fff;padding:8px 14px;border-radius:6px;text-decoration:none">Open and apply</a></p>
@@ -65,7 +75,7 @@ def build(picks: list[Job], runners_up: list[Job], alerts: list[dict], stats: di
     ru_html = ""
     if runners_up:
         rows = "".join(
-            f'<li>{(j.llm or {}).get("score", "?")}/10 &middot; <a href="{E(j.url)}">{E(j.title)}</a> at {E(j.company)} ({E(j.location)})</li>'
+            f'<li>{(j.llm or {}).get("score", "?")}/10 &middot; <a href="{E(j.url)}">{E(j.title)}</a> at {E(j.company)} ({E(j.location)}) &middot; {E(HOME)}: {E(((j.llm or {}).get("eligibility") or {}).get("eligible", "not checked"))}</li>'
             for j in runners_up
         )
         ru_html = f"<h3>Also worth a look (added to tracker)</h3><ul>{rows}</ul>"
@@ -87,6 +97,7 @@ def build(picks: list[Job], runners_up: list[Job], alerts: list[dict], stats: di
             f"- Why: {l.get('why_fit', '')}",
             f"- Gaps: {l.get('gaps', '')}",
             f"- Blockers: {l.get('prerequisites_blockers', '')}",
+            f"- Open to {HOME}: {verify.summary(j)}",
             f"- Lead with: {l.get('cover_note', '')}",
             f"- CV: {CV_FILES.get(l.get('cv_profile', ''), 'General')}",
             "",
