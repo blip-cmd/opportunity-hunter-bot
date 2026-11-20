@@ -131,6 +131,9 @@ def deadline_alerts(cfg: dict, state: dict, today: date) -> list[dict]:
         days = (date.fromisoformat(str(dl)) - today).days
         if days < 0:
             continue
+        start = notion.applying_from(cfg.get("notion") or {})
+        if start and str(dl)[:10] < start:      # before anyone configured starts applying
+            continue
         hit = [t for t in cfg["alerts"]["days_before"] if days <= t]
         if not hit:
             continue
@@ -277,8 +280,8 @@ def main() -> None:
                      "\n".join(notion.describe_finds(new_finds, find_dups, promos)))
         usable = scorer if scorer and scorer.available else None
         nstats = notion.check(nrows, usable, state, today, ncfg.get("max_llm_calls", 30))
-        alerts += notion.deadline_alerts(nrows, state, today, cfg["alerts"]["days_before"])
-        notes = notion.news(nrows, state)
+        alerts += notion.deadline_alerts(nrows, state, today, cfg["alerts"]["days_before"], ncfg)
+        notes = notion.news(nrows, state, ncfg)
         if ncfg.get("write"):
             fits, fstats = notion.score_fit(nrows, usable, state, notion.people_profiles(ncfg, SEARCH),
                                             ncfg.get("fit_max_calls", 40))
