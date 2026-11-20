@@ -28,6 +28,7 @@ from jobhunt import emailer
 from jobhunt.http import get
 from jobhunt.llm import Scorer
 from jobhunt.models import Job, clean_text, parse_date
+from scholarhunt import notion
 
 SEARCH = Path(__file__).resolve().parents[1]
 ROOT = SEARCH.parent
@@ -157,16 +158,36 @@ def write_tracker(rows: list[dict]) -> int:
     return len(new)
 
 
-def build_email(picks: list[Job], alerts: list[dict], stats: dict) -> tuple[str, str, str]:
+def build_email(picks: list[Job], alerts: list[dict], stats: dict, notes: list[dict] = ()) -> tuple[str, str, str]:
     today = date.today().isoformat()
     subject = f"Scholarships {today}: {len(picks)} new, {len(alerts)} deadline alert(s)"
+    if notes:
+        subject += f", {len(notes)} from Notion"
     cards = ""
     md = [f"# Scholarships {today}", ""]
     for a in alerts:
+        extra = f'<br><span style="color:#666;font-size:13px">{E(a["note"])}</span>' if a.get("note") else ""
+        link = f' &middot; <a href="{E(a["notion_url"])}">Notion</a>' if a.get("notion_url") else ""
         cards += (f'<div style="border-left:4px solid #d93025;padding:8px 12px;margin:0 0 10px">'
                   f'<b>{a["days"]} days left</b>: {E(a["name"])} (deadline {E(str(a["deadline"]))}) '
-                  f'<a href="{E(a["url"])}">open</a></div>')
-        md.append(f"- DEADLINE in {a['days']} days: {a['name']} ({a['deadline']}) {a['url']}")
+                  f'<a href="{E(a["url"])}">open</a>{link}{extra}</div>')
+        md.append(f"- DEADLINE in {a['days']} days: {a['name']} ({a['deadline']}) {a['url']}"
+                  + (f" | {a['note']}" if a.get("note") else ""))
+    if notes:
+        cards += '<h3 style="margin:16px 0 6px">From the Notion workspace</h3>'
+        md.append("## From the Notion workspace")
+    for n in notes:
+        if n["kind"] == "deadline":
+            f = n["found"]
+            line = f'Deadline found on the official page: {f["deadline"]}' + (f' ({f["applies_to"]})' if f.get("applies_to") else "")
+            quote = f'"{f["evidence"]}"'
+        else:
+            line, quote = "Lab page changed and mentions openings", ""
+        cards += (f'<div style="border-left:4px solid #1a73e8;padding:8px 12px;margin:0 0 10px">'
+                  f'<b>{E(n["title"])}</b> <span style="color:#666">({E(n["db"])})</span><br>{E(line)}'
+                  + (f'<br><span style="color:#666;font-size:13px">{E(quote)}</span>' if quote else "")
+                  + f'<br><a href="{E(n["link"])}">official page</a> &middot; <a href="{E(n["notion_url"])}">Notion row</a></div>')
+        md.append(f"- {n['title']} ({n['db']}): {line} {quote} {n['link']}")
     for i, j in enumerate(picks, 1):
         l = j.llm
         cards += f"""<div style="border:1px solid #ddd;border-radius:8px;padding:12px 14px;margin:0 0 12px">
@@ -239,9 +260,22 @@ def main() -> None:
                   key=lambda j: j.llm["score"], reverse=True)
     picks = [j for j in good if j.llm["score"] >= run["pick_min_score"]][: run["picks_max"]]
     alerts = deadline_alerts(cfg, state, today)
+
+    ncfg = cfg.get("notion") or {}
+    notes, nstats, nrows = [], {}, []
+    if ncfg:
+        log.info("Notion (read only):")
+        nrows = notion.in_scope(notion.fetch_rows(ncfg), ncfg)
+        usable = scorer if scorer and scorer.available else None
+        nstats = notion.check(nrows, usable, state, today, ncfg.get("max_llm_calls", 30))
+        alerts += notion.deadline_alerts(nrows, state, today, cfg["alerts"]["days_before"])
+        notes = notion.news(nrows, state)
+
     stats = {"relevant": len(found), "new": len(fresh),
              "LLM": ",".join(sorted({j.llm.get("model", "?") for j in scored})) or "none"}
-    subject, body, md = build_email(picks, alerts, stats)
+    if ncfg:
+        stats.update({"notion rows": len(nrows), **{f"notion {k}": v for k, v in nstats.items()}})
+    subject, body, md = build_email(picks, alerts, stats, notes)
     print("\n" + md)
     if a.dry_run:
         log.info("Dry run: nothing written or sent.")
@@ -256,7 +290,7 @@ def main() -> None:
     added = write_tracker(rows)
 
     sent = False
-    if picks or alerts:
+    if picks or alerts or notes:
         try:
             sent = emailer.send(subject, body, md, os.environ.get("ALERT_TO") or cfg["alerts"]["email"])
         except Exception as e:
@@ -266,8 +300,11 @@ def main() -> None:
     if sent:
         for al in alerts:
             state["alerted"][al["tag"]] = today.isoformat()
+        notion.mark_reported(notes, state)
     STATE.write_text(json.dumps(state, indent=1), encoding="utf-8")
-    log.info("Done. tracker +%d | picks %d | alerts %d | emailed %s", added, len(picks), len(alerts), sent)
+    log.info("Done. tracker +%d | picks %d | alerts %d | notion rows %d checked %d deadlines %d changed %d | emailed %s",
+             added, len(picks), len(alerts), len(nrows), nstats.get("checked", 0), nstats.get("deadlines", 0),
+             nstats.get("changed", 0), sent)
 
 
 if __name__ == "__main__":

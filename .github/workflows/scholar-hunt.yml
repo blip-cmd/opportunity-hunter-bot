@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (no email, nothing written to the private repo)"
+        description: "Dry run (no email, no state or tracker changes; only the private log is saved)"
         type: boolean
         default: false
 
@@ -58,11 +58,13 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}   # read only in this phase; integration sees one shared page
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}   # optional repo variable; empty means the code default
           DRY: ${{ inputs.dry_run }}
         run: |
           mkdir -p logs
-          log="logs/scholarhunt-$(date -u +%F).log"
+          suffix=""; [ "$DRY" = "true" ] && suffix="-cloud-dry"
+          log="logs/scholarhunt-$(date -u +%F)${suffix}.log"
           flag=""; [ "$DRY" = "true" ] && flag="--dry-run"
           set +e
           python -m scholarhunt.run $flag > "$log" 2>&1
@@ -74,16 +76,25 @@ jobs:
           exit $code
 
       - name: Save results to the private repo
-        if: ${{ always() && inputs.dry_run != true }}
+        if: ${{ always() }}
         working-directory: private
+        env:
+          DRY: ${{ inputs.dry_run }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add APPLICATIONS_TRACKER.csv SCHOLARSHIPS_TRACKER.csv search/state search/digests search/scholarhunt/state search/logs 2>/dev/null || true
+          if [ "$DRY" = "true" ]; then
+            # Dry runs keep only their log, so the result can be read without sending anything.
+            git add search/logs/*-cloud-dry.log 2>/dev/null || true
+            what="dry run"
+          else
+            git add APPLICATIONS_TRACKER.csv SCHOLARSHIPS_TRACKER.csv search/state search/digests search/scholarhunt/state search/logs 2>/dev/null || true
+            what="run"
+          fi
           if git diff --cached --quiet; then
             echo "Nothing new to save."
           else
-            git commit -q -m "chore: scholarhunt run $(date -u +%F) [skip ci]"
+            git commit -q -m "chore: scholarhunt $what $(date -u +%F) [skip ci]"
             git pull -q --rebase --autostash   # copied runner code is left unstaged on purpose
             git push -q
             echo "Saved."
