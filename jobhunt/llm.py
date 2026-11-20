@@ -33,7 +33,8 @@ PROVIDERS = [
         "name": "gemini",
         "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         "key_env": "GEMINI_API_KEY",
-        "model": os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash",
+        # A "latest" alias survives model retirements (gemini-2.5-flash closed to new keys in Nov 2026).
+        "model": os.environ.get("GEMINI_MODEL") or "gemini-flash-lite-latest",
         "min_interval": 6.5,  # free tier: ~10 requests/minute
     },
     {
@@ -131,13 +132,18 @@ class Scorer:
                 r = requests.post(
                     p["url"],
                     headers={"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"},
-                    json={"model": p["model"], "messages": messages, "temperature": 0.1, "max_tokens": 700},
-                    timeout=90,
+                    json={"model": p["model"], "messages": messages, "temperature": 0.1, "max_tokens": 1500},
+                    timeout=60,
                 )
             except requests.RequestException as e:
-                log.debug("%s network error: %s", p["name"], e)
+                log.info("%s network error or timeout: %s", p["name"], type(e).__name__)
                 time.sleep(5)
                 continue
+            if r.status_code in (500, 502, 503, 504) and self._has_spare(p):
+                # Overloaded: rest this slot and let the next key or provider answer.
+                self.resting[p["name"]] = time.time() + 60
+                log.info("%s overloaded (%s); trying next key", p["name"], r.status_code)
+                return None
             if r.status_code == 429:
                 retry = r.headers.get("retry-after")
                 # Short waits are per-minute limits; long ones mean the daily quota is gone.
