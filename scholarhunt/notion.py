@@ -262,12 +262,34 @@ def check(rows: list[dict], scorer, state: dict, today: date, max_calls: int) ->
     return stats
 
 
-def deadline_alerts(rows: list[dict], state: dict, today: date, days_before: list[int]) -> list[dict]:
+def applying_from(ncfg: dict, names: list[str] | None = None) -> str:
+    """The earliest date these consenting people start applying, as YYYY-MM-DD.
+
+    Empty means no limit: someone in scope is applying now, or nobody is configured.
+    Deadlines before this date are not reminded about (they belong to an earlier cycle).
+    """
+    ok, dates = consenting(ncfg or {}), []
+    for p in (ncfg or {}).get("people") or []:
+        if p["name"] in ok and (not names or p["name"] in names):
+            d = str(p.get("applying_from") or "")[:10]
+            if not d:
+                return ""
+            dates.append(d)
+    return min(dates) if dates else ""
+
+
+def _before_window(r: dict, dl: str, ncfg: dict | None) -> bool:
+    """True when the row's deadline falls before everyone it concerns starts applying."""
+    start = applying_from(ncfg or {}, [n for n in r["people"] if n in consenting(ncfg or {})] or None)
+    return bool(start) and dl[:10] < start
+
+
+def deadline_alerts(rows: list[dict], state: dict, today: date, days_before: list[int], ncfg: dict | None = None) -> list[dict]:
     """Same thresholds as the named programmes. The human date column wins over a found date."""
     alerts = []
     for r in rows:
         dl = r["human_deadline"] or (r["found"] or {}).get("deadline")
-        if not dl:
+        if not dl or _before_window(r, dl, ncfg):
             continue
         try:
             days = (date.fromisoformat(dl[:10]) - today).days
@@ -286,13 +308,13 @@ def deadline_alerts(rows: list[dict], state: dict, today: date, days_before: lis
     return alerts
 
 
-def news(rows: list[dict], state: dict) -> list[dict]:
+def news(rows: list[dict], state: dict, ncfg: dict | None = None) -> list[dict]:
     """Things worth a line in the email: newly found deadlines and lab pages with openings."""
     seen = state.setdefault("notion_reported", {})
     out = []
     for r in rows:
         f = r["found"]
-        if f and not r["human_deadline"] and seen.get(r["notion_url"]) != f["deadline"]:
+        if f and not r["human_deadline"] and seen.get(r["notion_url"]) != f["deadline"] and not _before_window(r, f["deadline"], ncfg):
             out.append({**r, "kind": "deadline", "key": f["deadline"]})
         if r["openings"]:
             out.append({**r, "kind": "openings", "key": None})
