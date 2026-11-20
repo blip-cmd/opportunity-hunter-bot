@@ -220,13 +220,13 @@ def main() -> None:
             msgs = [{"role": "system", "content": "You are a strict graduate-admissions advisor. Reply with one JSON object only."},
                     {"role": "user", "content": PROMPT.format(profile=profile, title=j.title, source=j.source,
                                                                description=j.description[:3500])}]
-            for p in scorer.providers:
+            for p in scorer.usable():
                 if p["name"] in scorer.dead:
                     continue
                 scorer.calls += 1
                 verdict = scorer._parse(scorer._chat(p, msgs))
                 if verdict:
-                    verdict["model"] = p["name"]
+                    verdict["model"] = p["provider"]
                     break
         j.llm = verdict or {"score": 4, "status": "WATCH", "model": "none", "university": j.company,
                             "level": "other", "funding": "unclear", "deadline": "Unknown",
