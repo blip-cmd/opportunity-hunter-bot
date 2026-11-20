@@ -262,14 +262,21 @@ def main() -> None:
     alerts = deadline_alerts(cfg, state, today)
 
     ncfg = cfg.get("notion") or {}
-    notes, nstats, nrows = [], {}, []
+    notes, nstats, nrows, plans, fstats = [], {}, [], [], {}
     if ncfg:
-        log.info("Notion (read only):")
+        log.info("Notion%s:", "" if ncfg.get("write") else " (read only)")
         nrows = notion.in_scope(notion.fetch_rows(ncfg), ncfg)
         usable = scorer if scorer and scorer.available else None
         nstats = notion.check(nrows, usable, state, today, ncfg.get("max_llm_calls", 30))
         alerts += notion.deadline_alerts(nrows, state, today, cfg["alerts"]["days_before"])
         notes = notion.news(nrows, state)
+        if ncfg.get("write"):
+            fits, fstats = notion.score_fit(nrows, usable, state, notion.people_profiles(ncfg, SEARCH),
+                                            ncfg.get("fit_max_calls", 40))
+            plans = notion.plan_writes(nrows, ncfg, today, fits)
+            log.info("Notion writes %s: %d rows (%d with changes)", "planned, NOT sent (dry run)" if a.dry_run else "to send",
+                     len(plans), sum(bool(p["changes"]) for p in plans))
+            log.info("\n".join(notion.describe(plans)) or "  none")
 
     stats = {"relevant": len(found), "new": len(fresh),
              "LLM": ",".join(sorted({j.llm.get("model", "?") for j in scored})) or "none"}
@@ -281,6 +288,9 @@ def main() -> None:
     subject, body, md = build_email(picks, alerts, stats, shown)
     print("\n" + md)
     if a.dry_run:
+        if ncfg.get("write"):
+            entry = notion.activity_entry(plans, 0, nstats, fstats, today, dry=True)
+            log.info("Bot Activity Log entry that a real run would append:\n%s", "\n".join(notion.entry_text(entry)))
         log.info("Dry run: nothing written or sent.")
         return
 
@@ -304,10 +314,16 @@ def main() -> None:
         for al in alerts:
             state["alerted"][al["tag"]] = today.isoformat()
         notion.mark_reported(notes, state)
+    written, failed = [], 0
+    if ncfg.get("write") and plans:
+        written, failed = notion.apply_writes(plans, ncfg)
+        logged = notion.append_log(ncfg, notion.activity_entry(written, failed, nstats, fstats, today, dry=False))
+        log.info("Notion: wrote %d rows, %d failed, activity log %s", len(written), failed, "added" if logged else "NOT added")
     STATE.write_text(json.dumps(state, indent=1), encoding="utf-8")
-    log.info("Done. tracker +%d | picks %d | alerts %d | notion rows %d checked %d deadlines %d changed %d | emailed %s",
+    log.info("Done. tracker +%d | picks %d | alerts %d | notion rows %d checked %d deadlines %d changed %d "
+             "written %d failed %d | emailed %s",
              added, len(picks), len(alerts), len(nrows), nstats.get("checked", 0), nstats.get("deadlines", 0),
-             nstats.get("changed", 0), sent)
+             nstats.get("changed", 0), len(written), failed, sent)
 
 
 if __name__ == "__main__":

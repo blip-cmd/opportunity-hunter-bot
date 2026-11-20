@@ -5,7 +5,7 @@ profile, config, tracker and log lives in a separate private data repo that the
 workflows check out at run time with a repo-scoped deploy key.
 
 - `jobhunt/`: every 2 days. Job boards, ATS feeds and opportunity RSS, scored by a free LLM, emailed as a ranked digest.
-- `scholarhunt/`: weekly. Scholarship RSS, watched lab pages and programme deadline alerts.
+- `scholarhunt/`: weekly. Scholarship RSS, watched lab pages, programme deadline alerts and, optionally, a Notion workspace (read rows, check official pages, write back).
 
 ## Secrets (Settings → Secrets and variables → Actions)
 
@@ -16,6 +16,7 @@ workflows check out at run time with a repo-scoped deploy key.
 | `GMAIL_ADDRESS` | Sender Gmail (a dedicated account) |
 | `GMAIL_APP_PASSWORD` | 16-character app password for it |
 | `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY` | Free LLM keys, at least one. Each may hold several comma-separated keys, used in turn so a rate limit or used-up quota on one key does not stall the run. |
+| `NOTION_TOKEN` | Optional. Internal Notion integration token. Scholar Hunt reads the databases named in the private config and, when that config sets `write: true`, fills only its own "Bot:" columns, empty deadline fields and an activity log page. It never deletes anything. |
 
 ## Rules for this public repo
 
