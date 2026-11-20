@@ -83,7 +83,7 @@ jobs:
             echo "Nothing new to save."
           else
             git commit -q -m "chore: jobhunt run $(date -u +%F) [skip ci]"
-            git pull -q --rebase
+            git pull -q --rebase --autostash   # copied runner code is left unstaged on purpose
             git push -q
             echo "Saved."
           fi
