@@ -2,17 +2,22 @@
 
 These sites rate-limit datacenter IPs (GitHub Actions). Each query is wrapped
 so one blocked site never breaks the run; small result counts keep us polite.
+Queries are spaced out, and after a few blocked queries in a row the rest are
+skipped for this run instead of hammering a site that has already said no.
 """
 from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Callable, Iterable
 
 from ..models import Job, clean_text, parse_date
 
 log = logging.getLogger("jobhunt")
 Keep = Callable[[str, str], bool]
+# JobSpy 1.4 logs through "jobspy"; older releases used non-propagating "JobSpy:<Site>" loggers.
+LOGGERS = ("", "jobspy") + tuple(f"JobSpy:{n}" for n in ("LinkedIn", "Indeed", "Google", "Glassdoor"))
 
 
 def _val(v) -> str:
@@ -21,13 +26,46 @@ def _val(v) -> str:
     return str(v)
 
 
-def jobspy(queries: list[dict], keep: Keep, hours_old: int = 168) -> Iterable[Job]:
+class _BlockCounter(logging.Handler):
+    """Counts the "status code 429" messages JobSpy logs when a site blocks us."""
+
+    def __init__(self):
+        super().__init__()
+        self.hits = 0
+
+    def emit(self, record):
+        if "429" in record.getMessage():
+            self.hits += 1
+
+
+def jobspy(queries: list[dict], keep: Keep, hours_old: int = 168,
+           pause: float = 30, max_blocked: int = 3) -> Iterable[Job]:
     try:
         from jobspy import scrape_jobs
     except ImportError:
         log.warning("  jobspy not installed; skipping")
         return
-    for q in queries:
+    blocks = _BlockCounter()
+    site_logs = [logging.getLogger(n) for n in LOGGERS]
+    for lg in site_logs:
+        lg.addHandler(blocks)
+    try:
+        yield from _run(scrape_jobs, queries, keep, hours_old, pause, max_blocked, blocks)
+    finally:
+        for lg in site_logs:
+            lg.removeHandler(blocks)
+
+
+def _run(scrape_jobs, queries, keep, hours_old, pause, max_blocked, blocks) -> Iterable[Job]:
+    blocked_in_a_row = 0
+    for i, q in enumerate(queries):
+        if blocked_in_a_row >= max_blocked:
+            log.info("  jobspy: %d blocked queries in a row; skipping the other %d this run",
+                     blocked_in_a_row, len(queries) - i)
+            return
+        if i:
+            time.sleep(pause)
+        hits_before = blocks.hits
         extra = {"country_indeed": q["country_indeed"]} if q.get("country_indeed") else {}
         try:
             df = scrape_jobs(
@@ -45,6 +83,8 @@ def jobspy(queries: list[dict], keep: Keep, hours_old: int = 168) -> Iterable[Jo
         except Exception as e:
             log.info("  jobspy '%s' @ %s failed: %s", q["term"], q.get("location", ""), str(e)[:120])
             continue
+        # Blocked means a site refused us and nothing came back at all.
+        blocked_in_a_row = blocked_in_a_row + 1 if blocks.hits > hits_before and len(df) == 0 else 0
         n = 0
         for row in df.to_dict("records"):
             title = _val(row.get("title"))

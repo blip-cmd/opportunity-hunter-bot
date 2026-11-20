@@ -55,7 +55,9 @@ def collect(cfg: dict, f: Filters, use_jobspy: bool) -> list[Job]:
             per_source[name.split(":")[0]] += len(got)
             jobs.extend(got)
     if use_jobspy:
-        got = list(jobspy_src.jobspy(cfg["jobspy"]["queries"], keep, cfg["jobspy"]["hours_old"]))
+        js = cfg["jobspy"]
+        got = list(jobspy_src.jobspy(js["queries"], keep, js["hours_old"],
+                                     js.get("pause_seconds", 30), js.get("max_blocked_in_a_row", 3)))
         per_source["jobspy"] += len(got)
         jobs.extend(got)
     log.info("Fetched %d candidate postings: %s", len(jobs), dict(per_source))
