@@ -59,7 +59,9 @@ def _card(rank: int, j: Job) -> str:
 </div>"""
 
 
-def build(picks: list[Job], runners_up: list[Job], alerts: list[dict], stats: dict) -> tuple[str, str, str]:
+def build(picks: list[Job], runners_up: list[Job], alerts: list[dict], stats: dict,
+          excluded: list[Job] | None = None) -> tuple[str, str, str]:
+    excluded = excluded or []
     today = date.today().isoformat()
     subject = f"Job picks {today}: " + (
         ", ".join(f"{j.company}" for j in picks[:3]) if picks else "no strong matches this round"
@@ -79,11 +81,19 @@ def build(picks: list[Job], runners_up: list[Job], alerts: list[dict], stats: di
             for j in runners_up
         )
         ru_html = f"<h3>Also worth a look (added to tracker)</h3><ul>{rows}</ul>"
+    ex_html = ""
+    if excluded:
+        rows = "".join(
+            f'<li>{(j.llm or {}).get("score", "?")}/10 &middot; <a href="{E(j.url)}">{E(j.title)}</a> at {E(j.company)}: {E(verify.summary(j))}</li>'
+            for j in excluded
+        )
+        ex_html = (f"<h3>Left out: judged not open to {E(HOME)}</h3>"
+                   f'<p style="color:#555;margin-top:0">The AI read the posting and decided you cannot apply. Open one if the quote looks wrong.</p><ul>{rows}</ul>')
     stat_line = " &middot; ".join(f"{k}: {v}" for k, v in stats.items())
     body = f"""<div style="font-family:Segoe UI,Arial,sans-serif;max-width:680px;color:#111">
 <h2 style="margin-bottom:4px">Your top picks for {today}</h2>
 <p style="color:#555;margin-top:0">Ranked by fit. Apply to these first. All are in APPLICATIONS_TRACKER.csv.</p>
-{cards}{alert_html}{ru_html}
+{cards}{alert_html}{ru_html}{ex_html}
 <p style="color:#888;font-size:12px;margin-top:24px">{stat_line}<br>Sources include Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Amazon, Remotive, RemoteOK, Himalayas, Jobicy, Arbeitnow, Working Nomads, We Work Remotely, Hacker News, opportunity feeds and JobSpy.</p>
 </div>"""
 
@@ -106,6 +116,8 @@ def build(picks: list[Job], runners_up: list[Job], alerts: list[dict], stats: di
         md += ["## Watchlist", *[f"- {a['name']}: {a['detail']} {a['url']}" for a in alerts], ""]
     if runners_up:
         md += ["## Also found", *[f"- {(j.llm or {}).get('score', '?')}/10 {j.title} at {j.company}: {j.url}" for j in runners_up], ""]
+    if excluded:
+        md += [f"## Left out: judged not open to {HOME}", *[f"- {(j.llm or {}).get('score', '?')}/10 {j.title} at {j.company}: {verify.summary(j)} {j.url}" for j in excluded], ""]
     md.append(f"_{stat_line.replace(' &middot; ', ' | ')}_")
     return subject, body, "\n".join(md)
 
