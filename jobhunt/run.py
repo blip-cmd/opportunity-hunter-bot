@@ -161,6 +161,7 @@ def main() -> None:
         (j for j in pool.values() if (j.llm or {}).get("status") in {"APPLY", "STRETCH"}),
         key=rank_value, reverse=True,
     )
+    excluded: list[Job] = []
     # 4b. Open the real posting of the best matches and drop any the candidate cannot apply to
     if scorer and scorer.providers:
         top = [j for j in ranked if j.llm["score"] >= run["pick_floor_score"]][: run.get("verify_max", 10)]
@@ -168,6 +169,7 @@ def main() -> None:
         for j in top:
             if j.key in store.jobs and not a.dry_run:
                 store.mark(j.key, llm=j.llm, **({"rejected": "not eligible from home country"} if verify.excluded(j) else {}))
+        excluded = [j for j in top if verify.excluded(j)]
         ranked = [j for j in ranked if not verify.excluded(j)]
     picks = [j for j in ranked if j.llm["score"] >= run["pick_min_score"]][: run["picks_max"]]
     if len(picks) < run["picks_min"]:  # never send fewer than picks_min if anything decent exists
@@ -183,7 +185,7 @@ def main() -> None:
         "fetched": len(raw), "new": len(fresh), "AI-reviewed": len(scored),
         "LLM": ",".join(sorted({(j.llm or {}).get("model", "?") for j in scored})) or "none",
     }
-    subject, html_body, md = emailer.build(picks, runners, alerts, stats)
+    subject, html_body, md = emailer.build(picks, runners, alerts, stats, excluded)
     print("\n" + md)
     if a.dry_run:
         log.info("Dry run: nothing written or sent.")
@@ -192,7 +194,7 @@ def main() -> None:
     # 6. Tracker, digest file, email, state
     today = date.today().isoformat()
     sent = False
-    if picks or alerts:
+    if picks or alerts or excluded:
         try:
             sent = emailer.send(subject, html_body, md, os.environ.get("ALERT_TO") or cfg["email"]["to"])
         except Exception as e:
