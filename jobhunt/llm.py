@@ -4,7 +4,10 @@ Order (all OpenAI-compatible chat endpoints, all free with no credit card):
   1. Google Gemini - GEMINI_API_KEY from aistudio.google.com/apikey
   2. Groq          - GROQ_API_KEY from console.groq.com/keys
   3. OpenRouter    - OPENROUTER_API_KEY from openrouter.ai/keys (":free" models)
-Set at least one. If none is set or all are exhausted, jobs keep their
+Set at least one. Each variable may hold several comma-separated keys: they are
+used in turn, a key that hits a per-minute limit is rested while the next one
+works, and a key whose daily quota is gone is retired for the run.
+If none is set or all are exhausted, jobs keep their
 keyword score only (capped so they never outrank AI-reviewed jobs).
 GitHub Models was the original first choice but GitHub retired it on 2026-07-30.
 
@@ -91,10 +94,12 @@ class Scorer:
         self.last_call = 0.0
         self.providers = []
         for p in PROVIDERS:
-            key = (os.environ.get(p["key_env"]) or "").strip()
-            if key:
-                self.providers.append({**p, "key": key})
+            keys = [k.strip() for k in (os.environ.get(p["key_env"]) or "").split(",") if k.strip()]
+            for i, key in enumerate(dict.fromkeys(keys)):
+                name = p["name"] if i == 0 else f'{p["name"]}#{i + 1}'
+                self.providers.append({**p, "provider": p["name"], "name": name, "key": key})
         self.dead: set[str] = set()
+        self.resting: dict[str, float] = {}  # key slot -> time it may be used again
         if self.providers:
             log.info("LLM providers available: %s", [p["name"] for p in self.providers])
         else:
@@ -104,6 +109,17 @@ class Scorer:
     @property
     def available(self) -> bool:
         return self.calls < self.max_calls and any(p["name"] not in self.dead for p in self.providers)
+
+    def usable(self) -> list[dict]:
+        """Live key slots in preference order. Rested slots go last, so a run never stalls."""
+        now = time.time()
+        live = [p for p in self.providers if p["name"] not in self.dead]
+        return [p for p in live if self.resting.get(p["name"], 0) <= now] +                [p for p in live if self.resting.get(p["name"], 0) > now]
+
+    def _has_spare(self, p: dict) -> bool:
+        now = time.time()
+        return any(q is not p and q["name"] not in self.dead and self.resting.get(q["name"], 0) <= now
+                   for q in self.providers)
 
     def _chat(self, p: dict, messages: list[dict]) -> str | None:
         wait = p["min_interval"] - (time.time() - self.last_call)
@@ -126,6 +142,11 @@ class Scorer:
                 retry = r.headers.get("retry-after")
                 # Short waits are per-minute limits; long ones mean the daily quota is gone.
                 if retry and retry.isdigit() and int(retry) <= 65 and attempt < 2:
+                    if self._has_spare(p):
+                        # Another key or provider is free: rest this one instead of waiting.
+                        self.resting[p["name"]] = time.time() + int(retry) + 1
+                        log.info("%s per-minute limit hit; trying next key", p["name"])
+                        return None
                     time.sleep(int(retry) + 1)
                     continue
                 log.warning("%s rate-limited (daily quota likely used); switching provider", p["name"])
@@ -187,12 +208,12 @@ class Scorer:
                 ),
             },
         ]
-        for p in self.providers:
+        for p in self.usable():
             if p["name"] in self.dead:
                 continue
             self.calls += 1
             out = self._parse(self._chat(p, messages))
             if out:
-                out["model"] = p["name"]
+                out["model"] = p["provider"]
                 return out
         return None
