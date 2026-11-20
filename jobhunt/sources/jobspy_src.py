@@ -28,18 +28,19 @@ def jobspy(queries: list[dict], keep: Keep, hours_old: int = 168) -> Iterable[Jo
         log.warning("  jobspy not installed; skipping")
         return
     for q in queries:
+        extra = {"country_indeed": q["country_indeed"]} if q.get("country_indeed") else {}
         try:
             df = scrape_jobs(
                 site_name=q.get("sites", ["indeed", "linkedin", "google"]),
                 search_term=q["term"],
                 google_search_term=q.get("google_term", f"{q['term']} jobs {q.get('location', '')}"),
                 location=q.get("location", ""),
-                country_indeed=q.get("country_indeed", "worldwide"),
                 is_remote=q.get("remote", False),
                 results_wanted=q.get("results", 20),
                 hours_old=hours_old,
                 linkedin_fetch_description=True,
                 verbose=0,
+                **extra,
             )
         except Exception as e:
             log.info("  jobspy '%s' @ %s failed: %s", q["term"], q.get("location", ""), str(e)[:120])
