@@ -275,7 +275,10 @@ def main() -> None:
              "LLM": ",".join(sorted({j.llm.get("model", "?") for j in scored})) or "none"}
     if ncfg:
         stats.update({"notion rows": len(nrows), **{f"notion {k}": v for k, v in nstats.items()}})
-    subject, body, md = build_email(picks, alerts, stats, notes)
+    # A found deadline that already has a reminder this week is shown once, as the reminder.
+    reminded = {a.get("notion_url") for a in alerts if a.get("notion_url")}
+    shown = [n for n in notes if n["kind"] != "deadline" or n["notion_url"] not in reminded]
+    subject, body, md = build_email(picks, alerts, stats, shown)
     print("\n" + md)
     if a.dry_run:
         log.info("Dry run: nothing written or sent.")
@@ -290,7 +293,7 @@ def main() -> None:
     added = write_tracker(rows)
 
     sent = False
-    if picks or alerts or notes:
+    if picks or alerts or shown:
         try:
             sent = emailer.send(subject, body, md, os.environ.get("ALERT_TO") or cfg["alerts"]["email"])
         except Exception as e:
