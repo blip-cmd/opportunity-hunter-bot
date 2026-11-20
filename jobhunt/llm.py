@@ -66,7 +66,7 @@ Title: {title}
 Location: {location}
 Source: {source}
 Posted: {posted}
-Description (truncated):
+Description:
 {description}
 
 Evaluate this posting for the candidate. Return JSON with exactly these keys:
@@ -210,15 +210,28 @@ class Scorer:
                     location=job.location,
                     source=job.source,
                     posted=job.posted.date().isoformat() if job.posted else "unknown",
-                    description=(job.description or "")[:3500],
+                    description=(job.description or "")[:12000],
                 ),
             },
         ]
+        return self._first_answer(messages, self._parse)
+
+    def ask(self, system: str, user: str) -> dict | None:
+        """One extra JSON question outside the scoring budget (used by verify.py)."""
+        def parse(text: str | None) -> dict | None:
+            m = re.search(r"\{.*\}", text or "", re.S)
+            try:
+                return json.loads(m.group(0)) if m else None
+            except json.JSONDecodeError:
+                return None
+        return self._first_answer([{"role": "system", "content": system}, {"role": "user", "content": user}], parse)
+
+    def _first_answer(self, messages: list[dict], parse) -> dict | None:
         for p in self.usable():
             if p["name"] in self.dead:
                 continue
             self.calls += 1
-            out = self._parse(self._chat(p, messages))
+            out = parse(self._chat(p, messages))
             if out:
                 out["model"] = p["provider"]
                 return out
