@@ -58,7 +58,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}   # read only in this phase; integration sees one shared page
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}   # integration sees one shared page; writes only Bot: columns and empty fields
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}   # optional repo variable; empty means the code default
           DRY: ${{ inputs.dry_run }}
         run: |
