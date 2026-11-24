@@ -5,7 +5,7 @@ profile, config, tracker and log lives in a separate private data repo that the
 workflows check out at run time with a repo-scoped deploy key.
 
 - `jobhunt/`: every 2 days. Job boards, ATS feeds and opportunity RSS, scored by a free LLM, emailed as a ranked digest.
-- `scholarhunt/`: weekly. Scholarship RSS, watched lab pages, programme deadline alerts and, optionally, a Notion workspace (read rows, check official pages, write back).
+- `scholarhunt/`: weekly. Scholarship RSS, public Telegram channels (read through their web preview, no login), watched lab pages, programme deadline alerts and, optionally, a Notion workspace (read rows, check official pages, write back).
 
 ## Secrets (Settings → Secrets and variables → Actions)
 
