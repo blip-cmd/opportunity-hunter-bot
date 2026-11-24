@@ -1,6 +1,6 @@
 """Entry point: python -m scholarhunt.run  (run from the search/ folder).
 
-Pipeline: scholarship RSS feeds -> dedupe -> keyword filter -> free LLM review
+Pipeline: scholarship RSS feeds and public Telegram channels -> dedupe -> keyword filter -> free LLM review
 -> rank -> SCHOLARSHIPS_TRACKER.csv + deadline alerts for named programmes
 -> one weekly email (only when there is something worth reading).
 
@@ -28,7 +28,7 @@ from jobhunt import emailer
 from jobhunt.http import get
 from jobhunt.llm import Scorer
 from jobhunt.models import Job, clean_text, parse_date
-from scholarhunt import notion
+from scholarhunt import notion, telegram
 
 SEARCH = Path(__file__).resolve().parents[1]
 ROOT = SEARCH.parent
@@ -93,7 +93,12 @@ def fetch(cfg: dict) -> list[Job]:
                            url=e.get("link", ""), description=body, posted=parse_date(e.get("published"))))
             n += 1
         log.info("  %s: %d relevant", f["name"], n)
-    return out
+    # After the feeds, so the fuller RSS text wins when a site posts the same link to both.
+    posts = [j for j in telegram.fetch(cfg.get("telegram") or {})
+             if inc.search(f"{j.title} {j.description}") and not exc.search(j.title)]
+    if posts:
+        log.info("  telegram: %d relevant", len(posts))
+    return out + posts
 
 
 _TRIGGERS = re.compile(r"ph\.?d (position|student|opening)|prospective students|funded|we are (hiring|recruiting)|join (us|the lab)|openings?", re.I)
